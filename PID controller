@@ -1,0 +1,167 @@
+#!/usr/bin/env python
+import rospy
+from marvelmind_nav.msg import hedge_pos_ang
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist
+import numpy as np
+import math
+from operator import truediv
+global posx_list, posy_list, input_v, input_omega
+posx_list = []
+posy_list = []
+posz_list = []
+beacon_xl = []
+beacon_yl = []
+beacon_zl = []
+input_v = []
+input_omega = []
+count_list = []
+count = 1
+def callback(data):
+    global x_pos, y_pos, z_pos, timestep
+    timestep = data.timestamp_ms
+    x_pos = data.x_m
+    y_pos = data.y_m
+    z_pos = data.z_m
+timestep = 0
+x_pos = 0
+y_pos = 0
+z_pos = 0
+theta = 0
+global e_prev, etheta_prev, e_sum, ethata_sum
+global distance_error, angular_error
+distance_error = 0
+angular_error = 0
+def callback_robot(data):
+    global x_curr, y_curr, z_curr
+    x_curr = data.pose.pose.position.x
+    y_curr = data.pose.pose.position.y
+    z_curr = data.pose.pose.position.z
+def myhook(): #function to shutdown tbot
+  rospy.loginfo("shutdown time!")
+def wrap_angle(rad):
+    # converts angles outside of +/-PI to +/-PI
+    if (rad > np.pi):
+        rad -= 2 * np.pi
+    if (rad < -np.pi):
+        rad += 2 * np.pi
+def calculateError():
+    #self.distance_error=getDistance([self.state_estimate.x,self.state_estimate.y],[self.goal.x,self.goal.y])
+    ex = goal_pos_x - x_pos
+    ey = goal_pos_y - y_pos
+        distance_error= math.sqrt(ex**2+ey**2)
+        #self.angular_error=getAngle([self.state_estimate.x,self.state_estimate.y],[self.goal.x,self.goal.y])
+    #self.angular_error=-self.desired_pose.orientation+self.state_estimate.orientation
+    angular_error= theta
+    #self.angular_error = (self.angular_error + 180) % 360 - 180
+    angular_error = (angular_error + 180) % 360 - 180
+def filterInput(lin_x_value, ang_z_value):
+    #if abs(self.distance_error) < position_threshold:
+    #     self.u.linear.x=0
+    #     self.u.angular.z=0
+    #     return
+    if abs(distance_error) < 0.05:
+        lin_x_value=0
+        ang_z_value=0
+        return lin_x_value,ang_z_value
+    #self.u.linear.x*=ANG_OFFSET*math.cos(self.angular_error*3.14/180)
+    lin_x_value*=-1.0*math.cos(angular_error*3.14/180)
+    #pos_x=self.cap(self.u.linear.x,lower_bound_linear_v,upper_bound_linear_v)
+    if lin_x_value > 1 :
+        lin_x_value = 1
+    elif lin_x_value < 0 :
+        lin_x_value = 0
+    
+    #self.u.angular.z=-self.cap(self.u.angular.z,lower_bound_angular_v,upper_bound_angular_v)
+    if ang_z_value > 2.5 :
+        ang_z_value = 2.5
+    elif ang_z_value < -2.5 :
+        ang_z_value = -2.5
+    return lin_x_value,ang_z_value
+def control():
+    rospy.init_node('calculator', anonymous = True)
+    rospy.Subscriber("/hedge_pos_ang", hedge_pos_ang, callback)
+    rospy.Subscriber("/odom", Odometry, callback_robot)
+    cmd_vel = rospy.Publisher('cmd_vel_mux/input/navi', Twist,queue_size=10)
+    x_prev = -timestep*np.cos(theta)
+    y_prev = -timestep*np.sin(theta)
+    move_cmd = Twist()
+    tolerance = 0.1
+    rospy.loginfo("in control")
+    e_prev = 0
+    etheta_prev = 0
+    e_sum = 0
+    etheta_sum = 0
+    while not rospy.is_shutdown():
+            rospy.loginfo(timestep)
+            kptheta = 5
+            kpv = 0.5
+            kitheta = 0.1
+            kiv = 0.08
+            kdtheta = 0.08
+            kdv = 0.1
+            ei_decay = 0.94
+            ethetai_decay = 0.94
+            ex = goal_pos_x - x_pos
+            ey = goal_pos_y - y_pos
+            #e = math.sqrt(ex**2+ey**2)
+            calculateError() # get e = distance_error
+            vp = kpv*distance_error
+            vd = kdv*(distance_error-e_prev)*timestep
+            e_prev = distance_error
+            e_sum = ei_decay*e_sum + distance_error
+            vi = kiv*e_sum
+            v = vp+vd+vi
+            etheta = wrap_angle(np.arctan2(ey,ex)-theta)
+            
+            wp = kptheta*etheta
+            wd = kdtheta*(etheta-etheta_prev)*timestep
+            etheta_prev = etheta
+            etheta_sum = ethetai_decay*etheta_sum + etheta
+            wi = kitheta*etheta_sum
+            w = wp+wd+wi
+            distpertime = 0.8 #mm
+            satv = np.clip(v,-distpertime,distpertime)
+            satw = np.clip(w,-distpertime*np.pi,distpertime*np.pi)
+            theta = wrap_angle(theta + satw*timestep)
+            linv, angw = filterInput(satv,satw)
+            rospy.loginfo("Goal x = %s y = %s , Current pos x = %s y = %s z = %s",goal_pos_x,goal_pos_y,x_pos,y_pos,z_pos)
+            rospy.loginfo("ex = %s ey = %s omega = %s v = %.3f",ex,ey,linv,angw)
+            input_v.append(linv)
+            input_omega.append(angw)
+            posx_list.append(x_curr)
+            posy_list.append(y_curr)
+            posz_list.append(z_curr)
+            beacon_xl.append(x_pos)
+            beacon_yl.append(y_pos)
+            beacon_zl.append(z_pos)
+            count_list.append(count)
+            move_cmd.linear.x = linv
+            move_cmd.angular.z = angw
+            cmd_vel.publish(move_cmd)
+            if distance_error<tolerance:
+                    rospy.loginfo("Reached Destination")
+                    rospy.signal_shutdown(myhook)
+            #rate.sleep()
+    file1 = open('data2.txt','w')
+    datainline = []
+    for i in range(len(posx_list)):
+              data = str(input_v[i]) + "," + str(input_omega[i]) + "," + str(posx_list[i]) + "," + str(posy_list[i]) + "," + str(posz_list[i]) + "," +  str(beacon_xl[i]) + "," + str(beacon_yl[i]) + "," + str(beacon_zl[i]) + "\n"
+              datainline.append(data)
+    file1.writelines(datainline)
+    file1.close
+    file1 = open('data2.txt','r')
+    #print(file1.read())
+    file1.close()
+if __name__ == '__main__':
+    global goal_pos_x
+    global goal_pos_y
+    goal_pos_x = input("Input goal pos x:")
+    goal_pos_y = input("Input goal pos y:")
+    try:
+         rospy.Subscriber("/hedge_pos_ang", hedge_pos_ang, callback)
+         rospy.Subscriber("/odom", Odometry, callback_robot)
+         control()
+    except rospy.ROSInterruptException:
+         rospy.loginfo("Terminating Program...")
+         pass
